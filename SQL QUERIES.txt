@@ -1,0 +1,252 @@
+SQL QUERIES crm_analysis
+
+--
+SELECT
+  COUNT(*) AS total_rows,
+  COUNTIF(Item IS NULL) AS null_item,
+  COUNTIF(Quantity IS NULL) AS null_quantity,
+  COUNTIF(`Price per Unit` IS NULL) AS null_price,
+  COUNTIF(`Total Spent` IS NULL) AS null_total
+FROM `datasetcrm1.crm_analysis.raw_sales`;
+
+
+
+-- Check on quality: duplicates and dates for RFM
+SELECT
+  COUNT(DISTINCT `Transaction ID`) AS unique_transactions,
+  COUNT(DISTINCT `Customer ID`) AS unique_customers,
+  MIN(`Transaction Date`) AS earliest_date,
+  MAX(`Transaction Date`) AS latest_date
+FROM `datasetcrm1.crm_analysis.raw_sales`;
+
+
+-- Cleaning: change NULL in Item for "Unknown", data check
+SELECT
+  `Transaction ID`,
+  `Customer ID`,
+  Category,
+  COALESCE(Item, 'Unknown') AS Item_clean,
+  `Price per Unit`,
+  Quantity,
+  `Total Spent`,
+  `Payment Method`,
+  Location,
+  `Transaction Date`,
+  `Discount Applied`
+FROM `datasetcrm1.crm_analysis.raw_sales`
+LIMIT 20;
+
+-- RFM base: Calculate Recency (days since the last purchase), Frequency (number of transactions), and Monetary (total spending) for each of the 25 customers.
+WITH rfm_base AS (
+  SELECT
+    `Customer ID` AS customer_id,
+    DATE_DIFF(DATE('2025-01-18'), MAX(DATE(`Transaction Date`)), DAY) AS recency_days,
+    COUNT(DISTINCT `Transaction ID`) AS frequency,
+    SUM(`Total Spent`) AS monetary
+  FROM `datasetcrm1.crm_analysis.raw_sales`
+  GROUP BY `Customer ID`
+)
+SELECT *
+FROM rfm_base
+ORDER BY monetary DESC;
+
+
+-- RFM: Assigning scores (1–4) and customer segments
+WITH rfm_base AS (
+  SELECT
+    `Customer ID` AS customer_id,
+    DATE_DIFF(DATE('2025-01-18'), MAX(DATE(`Transaction Date`)), DAY) AS recency_days,
+    COUNT(DISTINCT `Transaction ID`) AS frequency,
+    SUM(`Total Spent`) AS monetary
+  FROM `TWOJA_SCIEZKA`
+  GROUP BY `Customer ID`
+),
+
+rfm_scores AS (
+  SELECT
+    customer_id,
+    recency_days,
+    frequency,
+    monetary,
+    NTILE(4) OVER (ORDER BY recency_days DESC) AS r_score,
+    NTILE(4) OVER (ORDER BY frequency ASC) AS f_score,
+    NTILE(4) OVER (ORDER BY monetary ASC) AS m_score
+  FROM rfm_base
+)
+
+SELECT
+  customer_id,
+  recency_days,
+  frequency,
+  monetary,
+  r_score,
+  f_score,
+  m_score,
+  (r_score + f_score + m_score) AS rfm_total,
+  CASE
+    WHEN (r_score + f_score + m_score) >= 10 THEN 'VIP'
+    WHEN (r_score + f_score + m_score) >= 7 THEN 'Loyal'
+    WHEN (r_score + f_score + m_score) >= 4 THEN 'Occasional'
+    ELSE 'At risk'
+  END AS segment
+FROM rfm_scores
+ORDER BY rfm_total DESC;
+
+-- CONCLUSION: Promotions have different effects on different customer segments. 
+For “Loyal” and “Occasional” customers, the promotion slightly increases the average order value, thereby encouraging purchases.
+For VIP customers and those at risk of churning, the promotion decreases the average order value. For example, VIP customers make purchases regardless of promotions. 
+
+WITH rfm_base AS (
+  SELECT
+    `Customer ID` AS customer_id,
+    DATE_DIFF(DATE('2025-01-18'), MAX(DATE(`Transaction Date`)), DAY) AS recency_days,
+    COUNT(DISTINCT `Transaction ID`) AS frequency,
+    SUM(`Total Spent`) AS monetary
+  FROM `datasetcrm1.crm_analysis.raw_sales`
+  GROUP BY `Customer ID`
+),
+
+rfm_scores AS (
+  SELECT
+    customer_id,
+    NTILE(4) OVER (ORDER BY recency_days DESC) AS r_score,
+    NTILE(4) OVER (ORDER BY frequency ASC) AS f_score,
+    NTILE(4) OVER (ORDER BY monetary ASC) AS m_score
+  FROM rfm_base
+),
+
+rfm_segments AS (
+  SELECT
+    customer_id,
+    CASE
+      WHEN (r_score + f_score + m_score) >= 10 THEN 'VIP'
+      WHEN (r_score + f_score + m_score) >= 7 THEN 'Loyal'
+      WHEN (r_score + f_score + m_score) >= 4 THEN 'Occasional'
+      ELSE 'At risk'
+    END AS segment
+  FROM rfm_scores
+)
+
+SELECT
+  s.segment,
+  t.`Discount Applied` AS discount_applied,
+  COUNT(*) AS liczba_transakcji,
+  ROUND(AVG(t.`Total Spent`), 2) AS sredni_koszyk,
+  ROUND(SUM(t.`Total Spent`), 2) AS suma_wydatkow
+FROM `datasetcrm1.crm_analysis.raw_sales` t
+JOIN rfm_segments s
+  ON t.`Customer ID` = s.customer_id
+GROUP BY s.segment, t.`Discount Applied`
+ORDER BY s.segment, t.`Discount Applied`;
+
+
+-- check on location column
+SELECT
+  Location,
+  COUNT(*) AS liczba_transakcji
+FROM `datasetcrm1.crm_analysis.raw_sales`
+GROUP BY Location
+ORDER BY liczba_transakcji DESC;
+
+
+-- Analysis: client via online vs in-store by segment
+WITH rfm_base AS (
+  SELECT
+    `Customer ID` AS customer_id,
+    DATE_DIFF(DATE('2025-01-18'), MAX(DATE(`Transaction Date`)), DAY) AS recency_days,
+    COUNT(DISTINCT `Transaction ID`) AS frequency,
+    SUM(`Total Spent`) AS monetary
+  FROM `datasetcrm1.crm_analysis.raw_sales`
+  GROUP BY `Customer ID`
+),
+
+rfm_scores AS (
+  SELECT
+    customer_id,
+    NTILE(4) OVER (ORDER BY recency_days DESC) AS r_score,
+    NTILE(4) OVER (ORDER BY frequency ASC) AS f_score,
+    NTILE(4) OVER (ORDER BY monetary ASC) AS m_score
+  FROM rfm_base
+),
+
+rfm_segments AS (
+  SELECT
+    customer_id,
+    CASE
+      WHEN (r_score + f_score + m_score) >= 10 THEN 'VIP'
+      WHEN (r_score + f_score + m_score) >= 7 THEN 'Lojalni'
+      WHEN (r_score + f_score + m_score) >= 4 THEN 'Sporadyczni'
+      ELSE 'Zagrożeni odejściem'
+    END AS segment
+  FROM rfm_scores
+)
+
+SELECT
+  s.segment,
+  t.Location AS kanal,
+  COUNT(*) AS liczba_transakcji,
+  ROUND(AVG(t.`Total Spent`), 2) AS sredni_koszyk,
+  ROUND(SUM(t.`Total Spent`), 2) AS suma_wydatkow
+FROM `datasetcrm1.crm_analysis.raw_sales` t
+JOIN rfm_segments s
+  ON t.`Customer ID` = s.customer_id
+GROUP BY s.segment, t.Location
+ORDER BY s.segment, t.Location;
+
+
+WYNIK: 
+segment	kanal	liczba_transakcji	sredni_koszyk	suma_wydatkow
+Lojalni	In-store	3260	128.65	398814.5
+Lojalni	Online	3319	129.89	412800.0
+Sporadyczni	In-store	1678	131.41	206705.0
+Sporadyczni	Online	1740	129.58	216394.0
+VIP	In-store	781	128.42	96831.5
+VIP	Online	829	133.34	104009.0
+Zagrożeni odejściem	In-store	502	122.52	58319.0
+Zagrożeni odejściem	Online	466	132.27	58198.0
+
+
+Insight: VIP and at-risk customers spend more online than in-store (+3.8% and +8.0% avg order value), while loyal/occasional customers show little channel difference - suggesting digital channels are more effective for retaining high-value and at-risk segments.
+
+
+
+-- create VIEW with RFM segmentation
+CREATE OR REPLACE VIEW `datasetcrm1.crm_analysis.rfm_segments` AS
+WITH rfm_base AS (
+  SELECT
+    `Customer ID` AS customer_id,
+    DATE_DIFF(DATE('2025-01-18'), MAX(DATE(`Transaction Date`)), DAY) AS recency_days,
+    COUNT(DISTINCT `Transaction ID`) AS frequency,
+    SUM(`Total Spent`) AS monetary
+  FROM `datasetcrm1.crm_analysis.raw_sales`
+  GROUP BY `Customer ID`
+),
+
+rfm_scores AS (
+  SELECT
+    customer_id,
+    recency_days,
+    frequency,
+    monetary,
+    NTILE(4) OVER (ORDER BY recency_days DESC) AS r_score,
+    NTILE(4) OVER (ORDER BY frequency ASC) AS f_score,
+    NTILE(4) OVER (ORDER BY monetary ASC) AS m_score
+  FROM rfm_base
+)
+
+SELECT
+  customer_id,
+  recency_days,
+  frequency,
+  monetary,
+  r_score,
+  f_score,
+  m_score,
+  (r_score + f_score + m_score) AS rfm_total,
+  CASE
+    WHEN (r_score + f_score + m_score) >= 10 THEN 'VIP'
+    WHEN (r_score + f_score + m_score) >= 7 THEN 'Loyal'
+    WHEN (r_score + f_score + m_score) >= 4 THEN 'Occasional'
+    ELSE 'At Risk'
+  END AS segment
+FROM rfm_scores;
